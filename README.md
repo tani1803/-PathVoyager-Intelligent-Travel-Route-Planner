@@ -32,8 +32,9 @@ PathVoyager/
 ├── package-lock.json
 ├── djikstra.cpp       # C++ implementation of Dijkstra’s algorithm
 ├── djikstra.exe       # Compiled executable (generated)
-├── index.html         # Frontend interface 
-└── style.css
+├── index.html
+├── style.html         # Frontend interface 
+└── script.js
 ```
 ---
 
