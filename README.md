@@ -33,7 +33,7 @@ PathVoyager/
 ├── djikstra.cpp       # C++ implementation of Dijkstra’s algorithm
 ├── djikstra.exe       # Compiled executable (generated)
 ├── index.html
-├── style.html         # Frontend interface 
+├── style.css         # Frontend interface 
 └── script.js
 ```
 ---
