@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon ./backend/server.js"
+    "start": "nodemon ./backend/server.js",
+    "compile": "g++ -O2 -std=c++11 -o backend/route-engine/dijkstra.exe backend/route-engine/dijkstra.cpp",
+    "compile:linux": "g++ -O2 -std=c++11 -o backend/route-engine/dijkstra backend/route-engine/dijkstra.cpp",
+    "seed": "node backend/scripts/seedGraph.js"
   },
   "keywords": [],
   "author": "",

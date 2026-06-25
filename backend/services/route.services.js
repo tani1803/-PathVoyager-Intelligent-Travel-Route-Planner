@@ -1,234 +1,140 @@
-const axios = require("axios");
+/**
+ * route.services.js
+ *
+ * Bridges the Node.js REST API to the C++ Dijkstra engine via
+ * child_process IPC.
+ *
+ * Graph loading strategy (minimises API latency):
+ *   • On first request, fetches ALL edges from MongoDB → builds in-memory cache.
+ *   • Subsequent requests reuse the warm cache (zero DB overhead).
+ *   • Cache is rebuilt by re-running: npm run seed
+ *
+ * IPC flow:
+ *   1. Convert cached edges → CSV string
+ *   2. Spawn  backend/route-engine/dijkstra[.exe]
+ *   3. Pipe   CSV to child's stdin
+ *   4. Parse  JSON path from child's stdout
+ */
 
-const VALID_PREFERENCES = ["distance", "time", "cost"];
+const { execFile } = require("child_process");
+const path         = require("path");
+const GraphEdge    = require("../models/GraphEdge");
 
-// Load extended airport database
-const AIRPORTS = require("../data/airports");
+// ── Binary path (platform-aware) ──────────────────────────────────────────────
+const BINARY_NAME = process.platform === "win32" ? "dijkstra.exe" : "dijkstra";
+const BINARY_PATH = path.join(__dirname, "..", "route-engine", BINARY_NAME);
 
-// Local geocoding database — works offline, no external API needed
-const CITIES = require("../data/cities");
+// ── Valid preferences ─────────────────────────────────────────────────────────
+const VALID_PREFERENCES = ["distance", "cost", "time"];
+const UNIT_LABELS       = { distance: "km", cost: "₹", time: "min" };
 
-// Utility estimators — edit these files to change cost/time assumptions
-const { estimateDriveCost, estimateFlightCost } = require("../utils/costEstimator");
-const { estimateDriveTime, estimateFlightTime } = require("../utils/timeEstimator");
+// ── In-memory graph cache (loaded from MongoDB once at startup) ───────────────
+let graphCSVCache  = null;
+let citiesCache    = null;
 
-// ── Haversine: straight-line distance between two [lon, lat] points in km ──
-const haversine = (lon1, lat1, lon2, lat2) => {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-};
+/**
+ * Build CSV string from a list of edge documents.
+ * Format per line: from,to,distance,cost,time,transport
+ */
+const buildCSV = (edgeDocs) =>
+  edgeDocs
+    .map((e) => `${e.from},${e.to},${e.distance},${e.cost},${e.time},${e.transport}`)
+    .join("\n");
 
-// ── Find the best airport pair scored by the given preference ──
-const findBestAirports = (startCoord, endCoord, pref) => {
-  let bestPair = null;
-  let bestScore = Infinity;
+/**
+ * Load the complete weighted graph from MongoDB into memory.
+ * Falls back to the local graphEdges.js if MongoDB is unreachable.
+ * Called once on server startup.
+ */
+const loadGraphFromDB = async () => {
+  let edgeDocs;
 
-  // Top 5 nearest airports to each endpoint
-  const sortedOrigin = AIRPORTS
-    .map(a => ({ airport: a, dist: haversine(startCoord.lon, startCoord.lat, a.lon, a.lat) }))
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, 5);
-
-  const sortedDest = AIRPORTS
-    .map(a => ({ airport: a, dist: haversine(endCoord.lon, endCoord.lat, a.lon, a.lat) }))
-    .sort((a, b) => a.dist - b.dist)
-    .slice(0, 5);
-
-  for (const o of sortedOrigin) {
-    for (const d of sortedDest) {
-      if (o.airport.code === d.airport.code) continue;
-
-      const driveDist1  = o.dist;
-      const flightDist  = haversine(o.airport.lon, o.airport.lat, d.airport.lon, d.airport.lat);
-      const driveDist2  = d.dist;
-
-      const totalDist = driveDist1 + flightDist + driveDist2;
-      const totalTime = estimateDriveTime(driveDist1) + estimateFlightTime(flightDist) + estimateDriveTime(driveDist2);
-      const totalCost = estimateDriveCost(driveDist1) + estimateFlightCost(flightDist, o.airport.hub, d.airport.hub) + estimateDriveCost(driveDist2);
-
-      const score = pref === "time" ? totalTime : pref === "cost" ? totalCost : totalDist;
-
-      if (score < bestScore) {
-        bestScore = score;
-        bestPair  = { origin: o.airport, dest: d.airport };
-      }
-    }
+  try {
+    edgeDocs = await GraphEdge.find({}).lean();
+  } catch (dbErr) {
+    console.warn("\n⚠  MongoDB unavailable — falling back to local graphEdges.js");
+    console.warn("   Resume your Atlas cluster and run  npm run seed  for production.\n");
+    edgeDocs = null;
   }
 
-  return bestPair;
-};
-
-// ── Try to get a real driving route from OpenRouteService ──
-const getDrivingRoute = async (startLon, startLat, endLon, endLat, apiKey) => {
-  const res = await axios.post(
-    "https://api.openrouteservice.org/v2/directions/driving-car",
-    { coordinates: [[startLon, startLat], [endLon, endLat]] },
-    { headers: { "Content-Type": "application/json", Authorization: apiKey }, timeout: 4000 }
-  );
-  let summary;
-  if (res.data.features) {
-    summary = res.data.features[0].properties.summary;
-  } else if (res.data.routes) {
-    summary = res.data.routes[0].summary;
+  // If DB empty or unreachable, fall back to local static file
+  if (!edgeDocs || edgeDocs.length === 0) {
+    const { edges } = require("../data/graphEdges");
+    edgeDocs = edges.map((e) => ({
+      from: e.from, to: e.to,
+      distance: e.distance, cost: e.cost, time: e.time, transport: e.transport,
+    }));
+    console.warn(`   Using local graph: ${edgeDocs.length} edges loaded.\n`);
   }
-  return {
-    distanceKm: parseFloat((summary.distance / 1000).toFixed(2)),
-    timeHours:  parseFloat((summary.duration / 3600).toFixed(2)),
-  };
+
+  graphCSVCache = buildCSV(edgeDocs);
+
+  const citySet = new Set();
+  edgeDocs.forEach((e) => { citySet.add(e.from); citySet.add(e.to); });
+  citiesCache = Array.from(citySet).sort();
+
+  return { edgeCount: edgeDocs.length, cityCount: citiesCache.length };
 };
 
-// ── Extract score value for the chosen preference ──
-const getScore = (pref, dist, time, cost) => {
-  if (pref === "time") return time;
-  if (pref === "cost") return cost;
-  return dist;
-};
-
-// ── Main routing function ─────────────────────────────────────────────────────
-exports.getRouteFromEngine = async (from, to, preference = "distance") => {
-  if (!from || !to) throw new Error("Source and destination are required");
-  const pref   = VALID_PREFERENCES.includes(preference) ? preference : "distance";
-  const apiKey = process.env.ORS_API_KEY;
-  if (!apiKey) throw new Error("ORS_API_KEY is missing in .env file.");
-
-  // 1. Geocode both cities — local DB first, Nominatim as fallback
-  const geocode = async (city) => {
-    const key = city.trim().toLowerCase();
-
-    // (a) Check local cities database
-    if (CITIES[key]) {
-      return { lat: CITIES[key].lat, lon: CITIES[key].lon };
+/**
+ * Calls the C++ Dijkstra binary with the cached graph CSV.
+ *
+ * @param {string} from       - Origin city
+ * @param {string} to         - Destination city
+ * @param {string} preference - "distance" | "cost" | "time"
+ * @returns {Promise<Object>}
+ */
+const getRouteFromEngine = (from, to, preference = "distance") => {
+  return new Promise((resolve, reject) => {
+    if (!graphCSVCache) {
+      return reject(new Error("Graph not loaded. Server may still be starting up."));
     }
 
-    // (b) Check airport database by city name
-    const airportMatch = AIRPORTS.find(a => a.city.toLowerCase() === key);
-    if (airportMatch) {
-      return { lat: airportMatch.lat, lon: airportMatch.lon };
-    }
+    const pref = VALID_PREFERENCES.includes(preference) ? preference : "distance";
 
-    // (c) Fallback: Nominatim API (requires internet)
-    try {
-      const res = await axios.get(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(city)}&format=json`,
-        { headers: { "User-Agent": "TravelPlannerApp/1.0" }, timeout: 5000 }
-      );
-      if (res.data && res.data.length > 0) {
-        return { lat: parseFloat(res.data[0].lat), lon: parseFloat(res.data[0].lon) };
-      }
-    } catch (_) {
-      // Nominatim unreachable — that's fine, we already tried local
-    }
-
-    throw new Error(`City not found: "${city}". Try a major city name.`);
-  };
-
-  const startCoord = await geocode(from);
-  const endCoord   = await geocode(to);
-
-  const straightLineDist = haversine(startCoord.lon, startCoord.lat, endCoord.lon, endCoord.lat);
-
-  // 2. Build the direct driving option (may fail or fallback to offline estimation)
-  let driveOption = null;
-  // Only attempt direct drive if the straight-line distance is reasonable (e.g., <= 1500 km)
-  // This completely prevents showing a "road trip" across the ocean from New York to Haridwar.
-  if (straightLineDist <= 1500) {
-    try {
-      const direct    = await getDrivingRoute(startCoord.lon, startCoord.lat, endCoord.lon, endCoord.lat, apiKey);
-      const driveCost = estimateDriveCost(direct.distanceKm);
-      const score     = getScore(pref, direct.distanceKm, direct.timeHours, driveCost);
-      driveOption = {
-        score,
-        result: {
-          legs: [{ from, to, mode: "driving", distanceKm: direct.distanceKm, timeHours: direct.timeHours, cost: driveCost }],
-          total:      parseFloat(score.toFixed(2)),
-          preference: pref
+    const child = execFile(
+      BINARY_PATH,
+      [from, to, pref, "ALL"],
+      { timeout: 8000 },
+      (err, stdout, stderr) => {
+        if (err) {
+          if (err.code === "ENOENT") {
+            return reject(new Error(
+              `C++ binary not found at: ${BINARY_PATH}. Run  npm run compile  first.`
+            ));
+          }
+          return reject(new Error(`Engine error: ${stderr || err.message}`));
         }
-      };
-    } catch (_) {
-      // If ORS fails/timeout/offline, use Haversine approximation as fallback for direct drive
-      // Add 25% road winding factor for distance estimation
-      const driveDist = straightLineDist * 1.25; 
-      const approxTime = estimateDriveTime(driveDist);
-      const approxCost = estimateDriveCost(driveDist);
-      const score = getScore(pref, driveDist, approxTime, approxCost);
-      driveOption = {
-        score,
-        result: {
-          legs: [{ from, to, mode: "driving", distanceKm: parseFloat(driveDist.toFixed(2)), timeHours: approxTime, cost: approxCost }],
-          total: parseFloat(score.toFixed(2)),
-          preference: pref
-        }
-      };
-    }
-  }
 
-  // 3. Build the multi-leg flight option: drive → fly → drive
-  let flightOption = null;
-  const bestPair   = findBestAirports(startCoord, endCoord, pref);
-  if (bestPair) {
-    const originAirport = bestPair.origin;
-    const destAirport   = bestPair.dest;
-    const legs = [];
-    let totalDist = 0, totalTime = 0, totalCost = 0;
+        const raw = stdout.trim();
+        if (!raw) return reject(new Error("No output from Dijkstra engine."));
 
-    // Leg 1: Drive to origin airport
-    const distToOriginAirport = haversine(startCoord.lon, startCoord.lat, originAirport.lon, originAirport.lat);
-    if (distToOriginAirport > 5) {
-      try {
-        const drive1 = await getDrivingRoute(startCoord.lon, startCoord.lat, originAirport.lon, originAirport.lat, apiKey);
-        const cost1  = estimateDriveCost(drive1.distanceKm);
-        legs.push({ from, to: `${originAirport.city} Airport`, mode: "driving", distanceKm: drive1.distanceKm, timeHours: drive1.timeHours, cost: cost1 });
-        totalDist += drive1.distanceKm; totalTime += drive1.timeHours; totalCost += cost1;
-      } catch (_) {
-        // ORS failed for this short leg — use Haversine approximation
-        const approxTime = estimateDriveTime(distToOriginAirport);
-        const approxCost = estimateDriveCost(distToOriginAirport);
-        legs.push({ from, to: `${originAirport.city} Airport`, mode: "driving", distanceKm: parseFloat(distToOriginAirport.toFixed(2)), timeHours: approxTime, cost: approxCost });
-        totalDist += distToOriginAirport; totalTime += approxTime; totalCost += approxCost;
+        let parsed;
+        try { parsed = JSON.parse(raw); }
+        catch (_) { return reject(new Error(`Invalid JSON from engine: ${raw}`)); }
+
+        if (parsed.error) return reject(new Error(parsed.error));
+
+        resolve({
+          from,
+          to,
+          preference: pref,
+          unit:       UNIT_LABELS[pref],
+          path:       parsed.path,
+          transports: parsed.transports,
+          distance:   parsed.distance,
+          cost:       parsed.cost,
+          time:       parsed.time,
+        });
       }
-    }
+    );
 
-    // Leg 2: Flight between airports
-    const flightDist = parseFloat(haversine(originAirport.lon, originAirport.lat, destAirport.lon, destAirport.lat).toFixed(2));
-    const flightTime = estimateFlightTime(flightDist);
-    const flightCost = estimateFlightCost(flightDist, originAirport.hub, destAirport.hub);
-    legs.push({ from: `${originAirport.city} Airport`, to: `${destAirport.city} Airport`, mode: "flight", distanceKm: flightDist, timeHours: flightTime, cost: flightCost });
-    totalDist += flightDist; totalTime += flightTime; totalCost += flightCost;
-
-    // Leg 3: Drive from destination airport to final city
-    const distFromDestAirport = haversine(destAirport.lon, destAirport.lat, endCoord.lon, endCoord.lat);
-    if (distFromDestAirport > 5) {
-      try {
-        const drive2 = await getDrivingRoute(destAirport.lon, destAirport.lat, endCoord.lon, endCoord.lat, apiKey);
-        const cost2  = estimateDriveCost(drive2.distanceKm);
-        legs.push({ from: `${destAirport.city} Airport`, to, mode: "driving", distanceKm: drive2.distanceKm, timeHours: drive2.timeHours, cost: cost2 });
-        totalDist += drive2.distanceKm; totalTime += drive2.timeHours; totalCost += cost2;
-      } catch (_) {
-        const approxTime = estimateDriveTime(distFromDestAirport);
-        const approxCost = estimateDriveCost(distFromDestAirport);
-        legs.push({ from: `${destAirport.city} Airport`, to, mode: "driving", distanceKm: parseFloat(distFromDestAirport.toFixed(2)), timeHours: approxTime, cost: approxCost });
-        totalDist += distFromDestAirport; totalTime += approxTime; totalCost += approxCost;
-      }
-    }
-
-    const flightScore = getScore(pref, totalDist, totalTime, totalCost);
-    flightOption = {
-      score:  flightScore,
-      result: { legs, total: parseFloat(flightScore.toFixed(2)), preference: pref }
-    };
-  }
-
-  // 4. Pick the winner
-  if (!driveOption && !flightOption) throw new Error("No route could be calculated between these cities.");
-  if (!driveOption)  return flightOption.result;
-  if (!flightOption) return driveOption.result;
-
-  // Distance → direct road is always the shortest physical path
-  // Time / Cost → compare scores and return the better option
-  if (pref === "distance") return driveOption.result;
-  return flightOption.score < driveOption.score ? flightOption.result : driveOption.result;
+    child.stdin.write(graphCSVCache);
+    child.stdin.end();
+  });
 };
+
+/** Returns sorted list of all cities in the loaded graph. */
+const getCities = () => citiesCache || [];
+
+module.exports = { loadGraphFromDB, getRouteFromEngine, getCities };

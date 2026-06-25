@@ -1,89 +1,58 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-const CityAutocomplete = ({ label, id, placeholder, value, onChange }) => {
-  const [query, setQuery] = useState(value);
+// ── Graph-aware City Autocomplete ────────────────────────────────────────────
+const CityAutocomplete = ({ label, id, placeholder, value, onChange, allCities }) => {
+  const [query, setQuery]           = useState(value);
   const [suggestions, setSuggestions] = useState([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef(null);
 
   useEffect(() => {
-    // Sync external value changes
-    if (value !== query) {
-      setQuery(value);
-    }
+    if (value !== query) setQuery(value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
 
   useEffect(() => {
-    const fetchCities = async () => {
-      // Avoid fetching if query is exactly the selected value, or too short
-      if (!query || query.length < 2 || query === value) {
-        setSuggestions([]);
-        return;
-      }
-      try {
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&featuretype=city&limit=5`);
-        const data = await res.json();
-        
-        // Extract unique city names
-        const uniqueCities = Array.from(new Set(data.map(item => item.display_name.split(',')[0])));
-        setSuggestions(uniqueCities);
-      } catch (err) {
-        console.error("Error fetching cities", err);
-      }
-    };
-
-    const debounce = setTimeout(() => {
-      fetchCities();
-    }, 500);
-
-    return () => clearTimeout(debounce);
-  }, [query, value]);
+    if (!query || query.length < 2) { setSuggestions([]); return; }
+    const q = query.toLowerCase();
+    const filtered = allCities
+      .filter(c => c.toLowerCase().startsWith(q) || c.toLowerCase().includes(q))
+      .slice(0, 8);
+    setSuggestions(filtered);
+    setShowDropdown(filtered.length > 0);
+  }, [query, allCities]);
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+    const handleClick = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target))
         setShowDropdown(false);
-      }
     };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
   return (
     <div className="form-group" style={{ position: 'relative' }} ref={dropdownRef}>
       <label htmlFor={id}>{label}</label>
       <input
-        type="text"
-        id={id}
-        placeholder={placeholder}
-        value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
-          onChange(e.target.value);
-          setShowDropdown(true);
-        }}
-        onFocus={() => { if(suggestions.length > 0) setShowDropdown(true); }}
-        autoComplete="off"
+        type="text" id={id} placeholder={placeholder}
+        value={query} autoComplete="off"
+        onChange={(e) => { setQuery(e.target.value); onChange(e.target.value); setShowDropdown(true); }}
+        onFocus={() => { if (suggestions.length > 0) setShowDropdown(true); }}
       />
       {showDropdown && suggestions.length > 0 && (
         <ul className="autocomplete-dropdown" style={{
-          position: 'absolute', top: '100%', left: 0, right: 0, 
+          position: 'absolute', top: '100%', left: 0, right: 0,
           background: 'white', border: '1px solid #ddd', borderRadius: '4px',
-          zIndex: 10, listStyle: 'none', padding: 0, margin: 0, 
-          maxHeight: '150px', overflowY: 'auto', boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
+          zIndex: 100, listStyle: 'none', padding: 0, margin: 0,
+          maxHeight: '200px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
         }}>
           {suggestions.map((city, idx) => (
-            <li 
-              key={idx} 
-              style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid #f0f0f0', color: '#333' }}
-              onMouseDown={() => {
-                setQuery(city);
-                onChange(city);
-                setShowDropdown(false);
-              }}
-              onMouseEnter={(e) => e.target.style.background = '#f5f5f5'}
-              onMouseLeave={(e) => e.target.style.background = 'white'}
+            <li key={idx}
+              style={{ padding: '10px 14px', cursor: 'pointer', borderBottom: '1px solid #f0f0f0', color: '#333', fontSize: '0.95rem' }}
+              onMouseDown={() => { setQuery(city); onChange(city); setShowDropdown(false); }}
+              onMouseEnter={(e) => e.currentTarget.style.background = '#f0f7ff'}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'white'}
             >
               {city}
             </li>
@@ -94,171 +63,211 @@ const CityAutocomplete = ({ label, id, placeholder, value, onChange }) => {
   );
 };
 
+// ── Transport icon / style helpers ────────────────────────────────────────────
+const TRANSPORT_META = {
+  Flight: { icon: '✈️', color: '#4a90e2', bg: 'rgba(74,144,226,0.08)', border: 'rgba(74,144,226,0.25)', dash: true },
+  Train:  { icon: '🚂', color: '#8b5cf6', bg: 'rgba(139,92,246,0.08)', border: 'rgba(139,92,246,0.25)', dash: false },
+  Bus:    { icon: '🚌', color: '#f59e0b', bg: 'rgba(245,158,11,0.08)',  border: 'rgba(245,158,11,0.25)',  dash: false },
+  Drive:  { icon: '🚗', color: '#10b981', bg: 'rgba(16,185,129,0.08)', border: 'rgba(16,185,129,0.25)', dash: false },
+};
 
+const getMeta = (transport) => TRANSPORT_META[transport] || TRANSPORT_META.Drive;
+
+// Format time in hours+minutes
+const fmtTime = (minutes) => {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+};
+
+// ── Main App ─────────────────────────────────────────────────────────────────
 function App() {
-  const [from, setFrom] = useState('');
-  const [to, setTo] = useState('');
+  const [from, setFrom]           = useState('');
+  const [to, setTo]               = useState('');
   const [preference, setPreference] = useState('distance');
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [result, setResult]       = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const [allCities, setAllCities] = useState([]);
+
+  // Fetch city list from /api/cities on mount
+  useEffect(() => {
+    fetch('http://localhost:3000/api/cities')
+      .then(r => r.json())
+      .then(d => { if (d.cities) setAllCities(d.cities); })
+      .catch(() => {}); // silently ignore if backend is down
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    if (!from || !to) {
-      setError('Please enter both starting and destination cities.');
-      return;
-    }
+    if (!from || !to) { setError('Please enter both origin and destination cities.'); return; }
 
-    setLoading(true);
-    setError(null);
-    setResult(null);
+    setLoading(true); setError(null); setResult(null);
 
     try {
-      // Fetch from the backend running on port 3000
-      const response = await fetch(`http://localhost:3000/api/route?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&preference=${preference}`);
-      const data = await response.json();
+      const res  = await fetch(
+        `http://localhost:3000/api/route?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&preference=${preference}`
+      );
+      const data = await res.json();
 
-      if (!response.ok) {
-        throw new Error(data.error?.message || data.message || 'Failed to fetch route');
-      }
+      if (!res.ok || !data.success)
+        throw new Error(data.error?.message || 'Failed to fetch route');
 
       setResult(data);
     } catch (err) {
-      setError(err.message || 'An error occurred while fetching the route.');
+      setError(err.message || 'An unexpected error occurred.');
     } finally {
       setLoading(false);
     }
   };
 
+  // Build itinerary legs from path + transports arrays
+  const buildLegs = (result) => {
+    if (!result?.path || result.path.length < 2) return [];
+    return result.transports.map((t, i) => ({
+      from:      result.path[i],
+      to:        result.path[i + 1],
+      transport: t,
+    }));
+  };
+
+  const legs = result ? buildLegs(result) : [];
+
   return (
     <div className="app-container">
+      {/* Header */}
       <div className="header">
-        <h1>Travel Planner</h1>
-        <p>Find the optimal route between cities</p>
+        <h1>PathVoyager</h1>
+        <p>Intelligent route planning powered by Dijkstra's Algorithm</p>
       </div>
 
+      {/* Search Form */}
       <form onSubmit={handleSubmit}>
         <div className="form-row">
           <CityAutocomplete
-            label="Origin City"
-            id="from"
-            placeholder="e.g., New York, Delhi"
-            value={from}
-            onChange={setFrom}
+            label="Origin City"    id="from"
+            placeholder="e.g., Delhi, Mumbai"
+            value={from} onChange={setFrom} allCities={allCities}
           />
           <CityAutocomplete
-            label="Destination City"
-            id="to"
-            placeholder="e.g., Los Angeles, Mumbai"
-            value={to}
-            onChange={setTo}
+            label="Destination City" id="to"
+            placeholder="e.g., London, Singapore"
+            value={to}   onChange={setTo}   allCities={allCities}
           />
         </div>
 
         <div className="form-group">
           <label htmlFor="preference">Optimization Preference</label>
-          <select
-            id="preference"
-            value={preference}
-            onChange={(e) => setPreference(e.target.value)}
-          >
-            <option value="distance">Shortest Distance</option>
-            <option value="time">Fastest Time</option>
-            <option value="cost">Lowest Cost</option>
+          <select id="preference" value={preference} onChange={(e) => setPreference(e.target.value)}>
+            <option value="distance">📏 Shortest Distance</option>
+            <option value="time">⚡ Fastest Time</option>
+            <option value="cost">💰 Lowest Cost</option>
           </select>
         </div>
 
         <button type="submit" disabled={loading}>
-          {loading ? 'Calculating Route...' : 'Find Route'}
+          {loading ? 'Calculating...' : 'Find Optimal Route'}
         </button>
       </form>
 
-      {error && (
-        <div className="error-message">
-          {error}
-        </div>
-      )}
+      {/* Error */}
+      {error && <div className="error-message">{error}</div>}
 
-      {result && result.legs && (
+      {/* Result */}
+      {result && result.path && (
         <div className="result-container">
           <div className="result-header">
             <h2>Optimal Route</h2>
+
+            {/* Summary bar */}
             <div className="route-summary">
-              {result.total !== undefined && (
-                <div className="summary-item">
-                  <span className="summary-label">
-                    Total {result.preference.charAt(0).toUpperCase() + result.preference.slice(1)}
-                  </span>
-                  <span className="summary-value">
-                    {result.total} {result.preference === 'distance' ? 'km' : result.preference === 'time' ? 'hrs' : '₹'}
-                  </span>
-                </div>
-              )}
+              <div className="summary-item">
+                <span className="summary-label">📏 Distance</span>
+                <span className="summary-value">{result.distance.toLocaleString()} km</span>
+              </div>
+              <div className="summary-item">
+                <span className="summary-label">⏱ Time</span>
+                <span className="summary-value">{fmtTime(result.time)}</span>
+              </div>
+              <div className="summary-item">
+                <span className="summary-label">💰 Cost</span>
+                <span className="summary-value">₹{result.cost.toLocaleString()}</span>
+              </div>
+              <div className="summary-item">
+                <span className="summary-label">🔀 Legs</span>
+                <span className="summary-value">{legs.length}</span>
+              </div>
             </div>
           </div>
 
-          {/* Multi-leg itinerary */}
+          {/* Itinerary */}
           <div style={{ marginTop: '20px' }}>
-            {result.legs.map((leg, index) => {
-              const isFlight = leg.mode === 'flight';
-              const color = isFlight ? '#4a90e2' : '#10b981';
-              const bgColor = isFlight ? 'rgba(74,144,226,0.1)' : 'rgba(16,185,129,0.1)';
-              const borderColor = isFlight ? 'rgba(74,144,226,0.3)' : 'rgba(16,185,129,0.3)';
-
+            {legs.map((leg, idx) => {
+              const m = getMeta(leg.transport);
               return (
-                <div key={index}>
-                  {/* From city node (only show for first leg) */}
-                  {index === 0 && (
+                <div key={idx}>
+                  {/* Origin node */}
+                  {idx === 0 && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '6px' }}>
-                      <div style={{ width: '14px', height: '14px', borderRadius: '50%', background: color, flexShrink: 0, boxShadow: `0 0 8px ${color}60` }} />
-                      <span style={{ fontWeight: '700', fontSize: '1.05rem', color: '#1e293b' }}>{leg.from}</span>
+                      <div style={{ width: 14, height: 14, borderRadius: '50%', background: m.color, flexShrink: 0, boxShadow: `0 0 8px ${m.color}60` }} />
+                      <span style={{ fontWeight: 700, fontSize: '1.05rem', color: '#1e293b' }}>{leg.from}</span>
                     </div>
                   )}
 
-                  {/* Leg connector with mode badge */}
+                  {/* Connector + mode card */}
                   <div style={{ display: 'flex', gap: '12px', margin: '4px 0' }}>
-                    {/* Vertical line */}
-                    <div style={{ width: '14px', display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
+                    <div style={{ width: 14, display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
                       <div style={{
-                        width: '2px', minHeight: '70px',
-                        background: isFlight
-                          ? 'repeating-linear-gradient(to bottom, #4a90e2 0, #4a90e2 6px, transparent 6px, transparent 12px)'
-                          : '#10b981'
+                        width: 2, minHeight: 64,
+                        background: m.dash
+                          ? `repeating-linear-gradient(to bottom, ${m.color} 0, ${m.color} 6px, transparent 6px, transparent 12px)`
+                          : m.color,
                       }} />
                     </div>
-                    {/* Mode card */}
                     <div style={{
                       flex: 1, padding: '10px 14px',
-                      background: bgColor, border: `1px solid ${borderColor}`,
-                      borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                      background: m.bg, border: `1px solid ${m.border}`,
+                      borderRadius: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontSize: '1.3em' }}>{isFlight ? '✈️' : '🚗'}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: '1.25em' }}>{m.icon}</span>
                         <div>
-                          <div style={{ color, fontWeight: '600', fontSize: '0.95rem' }}>
-                            {isFlight ? `Fly: ${leg.from} → ${leg.to}` : `Drive: ${leg.from} → ${leg.to}`}
+                          <div style={{ color: m.color, fontWeight: 600, fontSize: '0.95rem' }}>
+                            {leg.transport}: {leg.from} → {leg.to}
                           </div>
-                          <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '2px' }}>
-                            {leg.distanceKm} km &nbsp;·&nbsp; {leg.timeHours} hrs
+                          <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: 2 }}>
+                            via {leg.transport}
                           </div>
                         </div>
                       </div>
-                      <div style={{ color, fontWeight: '700', fontSize: '1rem' }}>
-                        ₹{leg.cost}
+                      <div style={{ color: m.color, fontWeight: 700, fontSize: '0.9rem', textAlign: 'right' }}>
+                        {m.icon}
                       </div>
                     </div>
                   </div>
 
-                  {/* To city node */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '6px', marginBottom: index < result.legs.length - 1 ? '6px' : '0' }}>
-                    <div style={{ width: '14px', height: '14px', borderRadius: '50%', background: index < result.legs.length - 1 ? '#4a90e2' : '#10b981', flexShrink: 0, boxShadow: `0 0 8px ${index < result.legs.length - 1 ? '#4a90e260' : '#10b98160'}` }} />
-                    <span style={{ fontWeight: '700', fontSize: '1.05rem', color: '#1e293b' }}>{leg.to}</span>
+                  {/* Destination node */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: 6, marginBottom: idx < legs.length - 1 ? 6 : 0 }}>
+                    <div style={{
+                      width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
+                      background: idx < legs.length - 1 ? getMeta(legs[idx + 1].transport).color : '#10b981',
+                      boxShadow: `0 0 8px ${idx < legs.length - 1 ? getMeta(legs[idx + 1].transport).color : '#10b981'}60`,
+                    }} />
+                    <span style={{ fontWeight: 700, fontSize: '1.05rem', color: '#1e293b' }}>{leg.to}</span>
                   </div>
                 </div>
               );
             })}
+          </div>
+
+          {/* Algorithm note */}
+          <div style={{
+            marginTop: 20, padding: '10px 14px',
+            background: '#f8fafc', border: '1px solid #e2e8f0',
+            borderRadius: 8, fontSize: '0.82rem', color: '#64748b',
+          }}>
+            ⚙️ Route computed by <strong>Dijkstra's Algorithm</strong> O((V + E) log V) on a weighted bidirectional graph
+            — optimized for <strong>{preference}</strong>.
           </div>
         </div>
       )}

@@ -1,45 +1,56 @@
-# Intelligent Travel Route Planner
+# PathVoyager – Intelligent Travel Route Planner
 
-A high-performance route orchestration pipeline that integrates a **Node.js REST API backend** with real-time mapping services. This full-stack system dynamically computes and compares multi-modal travel routes, delivering sub-second optimization based on time, cost, and distance preferences.
-
----
-
-## 🚀 Features
-
-- **High-Performance Traversal:** Computes optimal travel paths dynamically using a highly optimized Node.js orchestration engine.
-- **Sub-Second Route Optimization:** Models real-world travel options evaluating 3 asymmetric variables (time, cost, distance) for lightning-fast results.
-- **Local Dataset & API Caching:** Minimizes external API latency by caching 130+ global hubs natively and mapping precise distances via OpenRouteService.
-- **Multi-Modal Comparisons:** Seamlessly evaluates direct driving routes against multi-leg flight options based on user constraints.
-- **MVC Architecture:** Built on a clean, scalable Model-View-Controller design pattern utilizing robust Express.js middlewares.
+PathVoyager is a highly performant, multi-modal travel route optimization engine. 
+The project integrates a **Node.js backend** with a custom **C++ implementation** of Dijkstra’s algorithm to compute the most efficient paths across a weighted transportation graph (Flight, Train, Bus, Drive).
 
 ---
 
-## 🛠️ Tech Stack
+## Features
 
-- **Node.js & Express** – REST API backend and core routing logic
-- **JavaScript** – High-performance orchestrator for geocoding and haversine calculations
-- **React** – Dynamic frontend interface
-- **OpenRouteService API** – Real-time map rendering and driving distance calculations
+- Computes optimal travel paths using **Dijkstra’s Algorithm**
+- Supports **multi-modal weighted graphs** (Distance, Cost, Time)
+- Handles **dynamic graph data** enriched via OpenRouteService
+- **In-memory caching** via MongoDB for sub-second API responses
+- Backend-driven computation via Inter-Process Communication (IPC)
 
 ---
 
-## 📂 Project Structure
-```text
-TravelPlanner/
-├── backend/
-│   ├── data/          # Local caching datasets (cities, airports)
-│   ├── utils/         # Cost and time estimation utilities
-│   ├── routes/        # REST API endpoints (MVC pattern)
-│   ├── services/      # Routing logic and API orchestration
-│   ├── middleware/    # Request validation and sanitization
-│   └── server.js      # Node.js backend server
-├── frontend/
-│   ├── public/        # Static assets
-│   ├── src/           # React frontend interface
-│   └── package.json   # Frontend dependencies
-├── package.json       # Backend dependencies
-├── .env               # Environment variables
-├── .gitignore
-└── README.md
+## Tech Stack
+
+- **Node.js & Express.js** – Backend REST API and orchestrator
+- **C++** – High-performance algorithmic engine `O((V + E) log V)`
+- **MongoDB** – Persistent graph storage and caching layer
+- **Child Processes** – Node.js invoking the C++ executable via standard I/O
+- **React.js** – Frontend interface for multi-leg itinerary visualization
+
+---
+
+## Project Structure
+
 ```
+PathVoyager/
+├── backend/
+│   ├── route-engine/
+│   │   ├── dijkstra.cpp         # C++ implementation of Dijkstra’s algorithm
+│   │   └── dijkstra.exe         # Compiled executable (generated)
+│   ├── scripts/
+│   │   └── seedGraph.js         # Populates MongoDB with OpenRouteService data
+│   ├── services/
+│   │   └── route.services.js    # Node.js IPC bridge & cache management
+│   ├── models/                  # MongoDB schemas
+│   ├── routes/                  # API endpoints
+│   └── server.js                # Node.js backend server
+├── frontend/                    # React frontend application
+├── .env.example                 # Environment variables template
+└── package.json                 # Backend dependencies & compilation scripts
+```
+
 ---
+
+## Setup Instructions
+
+1. **Install dependencies:** `npm install` and `cd frontend && npm install`
+2. **Configure environment:** Copy `.env.example` to `.env` and add your MongoDB URI.
+3. **Compile the engine:** `npm run compile`
+4. **Seed the database:** `npm run seed`
+5. **Start the application:** `npm run start` (Backend) and `npm start` (Frontend)

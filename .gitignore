@@ -5,3 +5,7 @@ backend/node_modules/
 .vscode/
 .cph/
 frontend/build/
+
+# Compiled C++ binaries (build locally with: npm run compile)
+backend/route-engine/dijkstra.exe
+backend/route-engine/dijkstra
